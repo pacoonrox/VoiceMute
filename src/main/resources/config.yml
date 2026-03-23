@@ -1,0 +1,4 @@
+discord:
+  enabled: true
+  # Paste your Discord webhook URL here (Server Settings > Integrations > Webhooks)
+  webhook-url: ""
