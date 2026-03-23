@@ -18,7 +18,7 @@ import java.text.SimpleDateFormat;
 import java.util.TimeZone;
 
 /**
- * LabyMutePlugin - Version 2.0.0
+ * LabyMutePlugin - Version 2.1
  * Refactored into separate classes; Discord integration now uses a plain webhook URL.
  */
 public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Listener {
@@ -55,7 +55,7 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
         }
 
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("LabyMute v2.0.0 Enabled.");
+        getLogger().info("LabyMute v2.1 Enabled.");
     }
 
     @Override

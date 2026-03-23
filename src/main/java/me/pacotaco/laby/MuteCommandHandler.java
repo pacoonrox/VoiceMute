@@ -98,7 +98,7 @@ public class MuteCommandHandler {
         if (args.length < 1) return false;
 
         String nameOrUuid = args[0];
-        String unmuteReason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "Appeal Accepted";
+        String unmuteReason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "";
 
         // Capture on main thread — Bukkit.getPlayer() is not thread-safe
         Player target = Bukkit.getPlayer(nameOrUuid);

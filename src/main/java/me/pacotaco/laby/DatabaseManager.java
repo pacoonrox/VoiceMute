@@ -147,7 +147,8 @@ public class DatabaseManager {
                                 "§6ID: #" + id + "  " + statusText + timeLeftText + " §7Staff: " + staff + "\n" +
                                 "§7Reason: §f" + reason + "\n" +
                                 "§7Date: §f" + estFormat.format(new Date(created)) +
-                                (expiry < PERMANENT_EXPIRY ? "\n§7Length: §f" + TimeUtil.formatLongTime(expiry - created) : "");
+                                (expiry < PERMANENT_EXPIRY ? "\n§7Length: §f" + TimeUtil.formatLongTime(expiry - created) : "") +
+                                (unmutedBy != null && !unmutedBy.contains("Overwritten") ? "\n§7Unmuted by: §f" + unmutedBy : "");
 
                         Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage(msg));
                     }
