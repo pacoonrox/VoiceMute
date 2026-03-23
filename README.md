@@ -8,7 +8,7 @@ A SQLite-backed Bukkit/Spigot plugin for muting players' LabyMod voice chat feat
 - Full per-player mute history with paginated `/labyhist`
 - Prune individual history entries with `/labyprune`
 - Discord webhook notifications for mutes and unmutes
-- Requires [LabyModServerAPI](https://github.com/LabyMod/labymod-server-api)
+- Requires [LabyModServerAPI](https://github.com/LabyMod/labymod4-server-api/releases/download/1.0.9/labymod-server-api-bukkit-1.0.9.jar)
 
 ## Commands
 
