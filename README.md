@@ -53,31 +53,13 @@ discord:
 
 **Requirements:** Java 21, Maven 3.6+
 
-The LabyMod Server API JAR must be installed into your local Maven repository before building:
-
-```bash
-# Download the JAR
-curl -L -o labymod-server-api-bukkit-1.0.9.jar \
-  https://github.com/LabyMod/labymod4-server-api/releases/download/1.0.9/labymod-server-api-bukkit-1.0.9.jar
-
-# Install it into your local Maven repo
-mvn install:install-file \
-  -Dfile=labymod-server-api-bukkit-1.0.9.jar \
-  -DgroupId=net.labymod.serverapi \
-  -DartifactId=laby-fixed \
-  -Dversion=1.0.9 \
-  -Dpackaging=jar
-```
-
-Then build the plugin:
-
 ```bash
 git clone https://github.com/pacoonrox/VoiceMute.git
 cd VoiceMute
 mvn package
 ```
 
-The compiled JAR will be at `target/LabyMutePlugin-2.0.0-SNAPSHOT.jar`.
+The compiled JAR will be at `target/LabyMutePlugin-2.1.jar`.
 
 ## Requirements
 - Paper/Spigot 1.21+ (or FlamePaper 1.8.x)
