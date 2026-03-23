@@ -79,15 +79,16 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
                          "SELECT reason, expiry FROM mutes WHERE uuid = ? AND active = 1 AND expiry > ?")) {
                 ps.setString(1, player.getUniqueId().toString());
                 ps.setLong(2, System.currentTimeMillis());
-                ResultSet rs = ps.executeQuery();
-                if (rs.next()) {
-                    String reason = rs.getString("reason");
-                    long expiry   = rs.getLong("expiry");
-                    // Delay to allow LabyMod handshake to complete
-                    Bukkit.getScheduler().runTaskLater(this, () -> voice.mute(player, reason, expiry), 60L);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String reason = rs.getString("reason");
+                        long expiry   = rs.getLong("expiry");
+                        // Delay to allow LabyMod handshake to complete
+                        Bukkit.getScheduler().runTaskLater(this, () -> voice.mute(player, reason, expiry), 60L);
+                    }
                 }
             } catch (SQLException e) {
-                e.printStackTrace();
+                getLogger().severe("Failed to re-apply mute on join for " + player.getName() + ": " + e.getMessage());
             }
         });
     }

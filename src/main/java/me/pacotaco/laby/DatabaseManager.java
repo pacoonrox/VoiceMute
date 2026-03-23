@@ -68,7 +68,7 @@ public class DatabaseManager {
             ps.setString(3, target);
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
-            e.printStackTrace();
+            plugin.getLogger().severe("Failed to prune entry #" + id + ": " + e.getMessage());
             return false;
         }
     }
@@ -99,8 +99,9 @@ public class DatabaseManager {
                     "SELECT COUNT(*) FROM mutes WHERE LOWER(target_name) = LOWER(?) OR uuid = ?")) {
                 ps.setString(1, target);
                 ps.setString(2, target);
-                ResultSet rs = ps.executeQuery();
-                if (rs.next()) total = rs.getInt(1);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) total = rs.getInt(1);
+                }
             }
 
             if (total == 0) {
@@ -118,48 +119,48 @@ public class DatabaseManager {
                 ps.setString(2, target);
                 ps.setInt(3, pageSize);
                 ps.setInt(4, offset);
-                ResultSet rs = ps.executeQuery();
+                try (ResultSet rs = ps.executeQuery()) {
+                    long now = System.currentTimeMillis();
+                    while (rs.next()) {
+                        int id        = rs.getInt("id");
+                        long expiry   = rs.getLong("expiry");
+                        long created  = rs.getLong("created_at");
+                        String staff  = rs.getString("staff_name");
+                        String reason = rs.getString("reason");
+                        String unmutedBy = rs.getString("unmuted_by");
 
-                long now = System.currentTimeMillis();
-                while (rs.next()) {
-                    int id        = rs.getInt("id");
-                    long expiry   = rs.getLong("expiry");
-                    long created  = rs.getLong("created_at");
-                    String staff  = rs.getString("staff_name");
-                    String reason = rs.getString("reason");
-                    String unmutedBy = rs.getString("unmuted_by");
+                        String statusText;
+                        String timeLeftText = "";
 
-                    String statusText;
-                    String timeLeftText = "";
+                        if (unmutedBy != null) {
+                            statusText = unmutedBy.contains("Overwritten") ? "§c[Overwritten]" : "§7[Unmuted]";
+                        } else if (expiry >= PERMANENT_EXPIRY) {
+                            statusText = "§4[Permanent]";
+                        } else if (now >= expiry) {
+                            statusText = "§8[Expired]";
+                        } else {
+                            statusText = "§c[Active]";
+                            timeLeftText = " §8(§e" + TimeUtil.formatLongTime(expiry - now) + " left§8)";
+                        }
 
-                    if (unmutedBy != null) {
-                        statusText = unmutedBy.contains("Overwritten") ? "§c[Overwritten]" : "§7[Unmuted]";
-                    } else if (expiry >= PERMANENT_EXPIRY) {
-                        statusText = "§4[Permanent]";
-                    } else if (now >= expiry) {
-                        statusText = "§8[Expired]";
-                    } else {
-                        statusText = "§c[Active]";
-                        timeLeftText = " §8(§e" + TimeUtil.formatLongTime(expiry - now) + " left§8)";
+                        final String msg = "§8§m--------------------------------------\n" +
+                                "§6ID: #" + id + "  " + statusText + timeLeftText + " §7Staff: " + staff + "\n" +
+                                "§7Reason: §f" + reason + "\n" +
+                                "§7Date: §f" + estFormat.format(new Date(created)) +
+                                (expiry < PERMANENT_EXPIRY ? "\n§7Length: §f" + TimeUtil.formatLongTime(expiry - created) : "");
+
+                        Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage(msg));
                     }
 
-                    final String msg = "§8§m--------------------------------------\n" +
-                            "§6ID: #" + id + "  " + statusText + timeLeftText + " §7Staff: " + staff + "\n" +
-                            "§7Reason: §f" + reason + "\n" +
-                            "§7Date: §f" + estFormat.format(new Date(created)) +
-                            (expiry < PERMANENT_EXPIRY ? "\n§7Length: §f" + TimeUtil.formatLongTime(expiry - created) : "");
-
-                    Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage(msg));
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        sender.sendMessage("§8§m--------------------------------------");
+                        if (finalTotal > offset + pageSize)
+                            sender.sendMessage("§7View more: §f/labyhist " + target + " " + (page + 1));
+                    });
                 }
-
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    sender.sendMessage("§8§m--------------------------------------");
-                    if (finalTotal > offset + pageSize)
-                        sender.sendMessage("§7View more: §f/labyhist " + target + " " + (page + 1));
-                });
             }
         } catch (SQLException e) {
-            e.printStackTrace();
+            plugin.getLogger().severe("Failed to load history for " + target + ": " + e.getMessage());
         }
     }
 }

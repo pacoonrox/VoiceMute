@@ -100,9 +100,11 @@ public class MuteCommandHandler {
         String nameOrUuid = args[0];
         String unmuteReason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "Appeal Accepted";
 
+        // Capture on main thread — Bukkit.getPlayer() is not thread-safe
+        Player target = Bukkit.getPlayer(nameOrUuid);
+        String uuidStr = (target != null) ? target.getUniqueId().toString() : nameOrUuid;
+
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            Player target = Bukkit.getPlayer(nameOrUuid);
-            String uuidStr = (target != null) ? target.getUniqueId().toString() : nameOrUuid;
 
             if (!db.isCurrentlyMuted(uuidStr, nameOrUuid)) {
                 Bukkit.getScheduler().runTask(plugin, () ->
@@ -142,7 +144,13 @@ public class MuteCommandHandler {
         if (args.length < 2) { sender.sendMessage("§cUsage: /labyprune <player> <ID>"); return true; }
 
         String target = args[0];
-        int entryId = TimeUtil.tryParseInt(args[1]);
+        int entryId;
+        try {
+            entryId = Integer.parseInt(args[1]);
+        } catch (NumberFormatException e) {
+            sender.sendMessage("§cInvalid ID — must be a number.");
+            return true;
+        }
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             boolean affected = db.pruneEntry(entryId, target);
