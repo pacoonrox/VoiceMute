@@ -88,6 +88,22 @@ public class DatabaseManager {
         }
     }
 
+    /** Returns the properly-cased name stored in the DB for a given UUID or name, or null if not found. */
+    public String getCanonicalName(String uuid, String nameOrUuid) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT target_name FROM mutes WHERE uuid = ? OR LOWER(target_name) = LOWER(?) ORDER BY id DESC LIMIT 1")) {
+            ps.setString(1, uuid);
+            ps.setString(2, nameOrUuid);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getString("target_name");
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().severe("Failed to get canonical name: " + e.getMessage());
+        }
+        return null;
+    }
+
     /** Runs async; sends results back on main thread via Bukkit scheduler. */
     public void showHistoryPage(CommandSender sender, String target, int page) {
         final int pageSize = 8;
@@ -109,9 +125,11 @@ public class DatabaseManager {
                 return;
             }
 
+            String canonical = getCanonicalName(target, target);
+            final String displayName = (canonical != null) ? canonical : target;
             final int finalTotal = total;
             Bukkit.getScheduler().runTask(plugin, () ->
-                    sender.sendMessage("§2§lLabyMod History: §a" + target + " §7(" + finalTotal + " entries)"));
+                    sender.sendMessage("§2§lLabyMod History: §a" + displayName + " §7(" + finalTotal + " entries)"));
 
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT * FROM mutes WHERE LOWER(target_name) = LOWER(?) OR uuid = ? ORDER BY id DESC LIMIT ? OFFSET ?")) {
@@ -156,7 +174,7 @@ public class DatabaseManager {
                     Bukkit.getScheduler().runTask(plugin, () -> {
                         sender.sendMessage("§8§m--------------------------------------");
                         if (finalTotal > offset + pageSize)
-                            sender.sendMessage("§7View more: §f/labyhist " + target + " " + (page + 1));
+                            sender.sendMessage("§7View more: §f/labyhist " + displayName + " " + (page + 1));
                     });
                 }
             }

@@ -98,7 +98,7 @@ public class MuteCommandHandler {
         if (args.length < 1) return false;
 
         String nameOrUuid = args[0];
-        String unmuteReason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "";
+        String unmuteReason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "No reason specified";
 
         // Capture on main thread — Bukkit.getPlayer() is not thread-safe
         Player target = Bukkit.getPlayer(nameOrUuid);
@@ -116,15 +116,18 @@ public class MuteCommandHandler {
                     "UPDATE mutes SET active = 0, unmuted_by = ? WHERE (uuid = ? OR LOWER(target_name) = LOWER(?)) AND active = 1 AND expiry > ?",
                     sender.getName(), uuidStr, nameOrUuid, System.currentTimeMillis());
 
+            String canonical = (target != null) ? target.getName() : db.getCanonicalName(uuidStr, nameOrUuid);
+            final String displayName = (canonical != null) ? canonical : nameOrUuid;
+
             Bukkit.getScheduler().runTask(plugin, () -> {
                 if (target != null) {
                     voice.unmute(target);
                     target.sendMessage("§aYour LabyMod VoiceChat mute has been lifted.");
                 }
-                notifyStaff("§c" + sender.getName() + " §7Laby-unmuted §c" + nameOrUuid);
+                notifyStaff("§c" + sender.getName() + " §7Laby-unmuted §c" + displayName);
             });
 
-            discord.sendUnmute(nameOrUuid, sender.getName(), unmuteReason);
+            discord.sendUnmute(displayName, sender.getName(), unmuteReason);
         });
         return true;
     }
