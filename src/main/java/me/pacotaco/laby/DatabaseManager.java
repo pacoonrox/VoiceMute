@@ -6,27 +6,26 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 
 import java.sql.*;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.UUID;
 
 public class DatabaseManager {
 
-    public record ActiveMute(String reason, long expiry) {}
-
-    private static final long PERMANENT_EXPIRY = LabyMutePlugin.PERMANENT_EXPIRY;
+    public record ActiveMute(String reason, Instant expiry) {}
 
     private final LabyMutePlugin plugin;
-    private final SimpleDateFormat estFormat;
+    private final DateTimeFormatter displayFormatter;
     private HikariDataSource dataSource;
 
-    public DatabaseManager(LabyMutePlugin plugin, SimpleDateFormat estFormat) {
-        this.plugin = plugin;
-        this.estFormat = estFormat;
+    public DatabaseManager(LabyMutePlugin plugin, ZoneId displayZone) {
+        this.plugin           = plugin;
+        this.displayFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd h:mm a (z)").withZone(displayZone);
     }
 
     public Connection getConnection() throws SQLException {
@@ -34,43 +33,59 @@ public class DatabaseManager {
     }
 
     public void setupDatabase() {
-        String host     = plugin.getConfig().getString("mysql.host", "localhost");
-        int    port     = plugin.getConfig().getInt("mysql.port", 3306);
-        String database = plugin.getConfig().getString("mysql.database", "voicemute");
-        String username = plugin.getConfig().getString("mysql.username", "root");
-        String password = plugin.getConfig().getString("mysql.password", "");
-        boolean useSSL  = plugin.getConfig().getBoolean("mysql.ssl", false);
+        String  host     = plugin.getConfig().getString("mysql.host", "localhost");
+        int     port     = plugin.getConfig().getInt("mysql.port", 3306);
+        String  database = plugin.getConfig().getString("mysql.database", "voicemute");
+        String  username = plugin.getConfig().getString("mysql.username", "root");
+        String  password = plugin.getConfig().getString("mysql.password", "");
+        boolean useSSL   = plugin.getConfig().getBoolean("mysql.ssl", false);
 
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + database
-                + "?useSSL=" + useSSL + "&allowPublicKeyRetrieval=true&characterEncoding=UTF-8");
+                + "?useSSL=" + useSSL
+                + "&allowPublicKeyRetrieval=true"
+                + "&characterEncoding=UTF-8"
+                + "&serverTimezone=UTC");
         config.setUsername(username);
         config.setPassword(password);
         config.setMaximumPoolSize(10);
         config.setMinimumIdle(2);
-        config.setConnectionTimeout(30000);
-        config.setIdleTimeout(600000);
-        config.setMaxLifetime(1800000);
+        config.setConnectionTimeout(30_000);
+        config.setIdleTimeout(600_000);
+        config.setMaxLifetime(1_800_000);
 
         Logger.getLogger("me.pacotaco.laby.libs.hikari").setLevel(Level.WARNING);
 
         try {
             dataSource = new HikariDataSource(config);
             try (Connection conn = getConnection(); Statement s = conn.createStatement()) {
+                // Create table with proper DATETIME columns on fresh installs
                 s.execute("CREATE TABLE IF NOT EXISTS mutes (" +
                         "id INT AUTO_INCREMENT PRIMARY KEY, " +
                         "uuid CHAR(36) NOT NULL, " +
                         "target_name VARCHAR(16) NOT NULL, " +
                         "staff_name VARCHAR(16) NOT NULL, " +
                         "reason TEXT NOT NULL, " +
-                        "expiry BIGINT NOT NULL, " +
+                        "expiry DATETIME NOT NULL, " +
                         "active TINYINT(1) NOT NULL DEFAULT 1, " +
-                        "created_at BIGINT NOT NULL, " +
+                        "created_at DATETIME NOT NULL, " +
                         "unmuted_by VARCHAR(64) DEFAULT NULL, " +
                         "INDEX idx_uuid (uuid), " +
                         "INDEX idx_target_name (target_name), " +
                         "INDEX idx_active_expiry (active, expiry)" +
                         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+                // Migrate existing installs that used BIGINT epoch-ms columns
+                try (ResultSet rs = conn.getMetaData().getColumns(null, null, "mutes", "expiry")) {
+                    if (rs.next() && "BIGINT".equalsIgnoreCase(rs.getString("TYPE_NAME"))) {
+                        plugin.getLogger().info("Migrating mutes table: BIGINT timestamps → DATETIME...");
+                        s.execute("ALTER TABLE mutes ADD COLUMN expiry_dt DATETIME, ADD COLUMN created_dt DATETIME");
+                        s.execute("UPDATE mutes SET expiry_dt = FROM_UNIXTIME(expiry / 1000), created_dt = FROM_UNIXTIME(created_at / 1000)");
+                        s.execute("ALTER TABLE mutes DROP COLUMN expiry, DROP COLUMN created_at");
+                        s.execute("ALTER TABLE mutes RENAME COLUMN expiry_dt TO expiry, RENAME COLUMN created_dt TO created_at");
+                        plugin.getLogger().info("Migration complete.");
+                    }
+                }
             }
             plugin.getLogger().info("Connected to MySQL database.");
         } catch (SQLException e) {
@@ -80,20 +95,20 @@ public class DatabaseManager {
     }
 
     public void close() {
-        if (dataSource != null && !dataSource.isClosed()) {
-            dataSource.close();
-        }
+        if (dataSource != null && !dataSource.isClosed()) dataSource.close();
     }
 
-    /** Returns the active mute for the given UUID, or null if the player is not muted. */
+    /** Returns the active mute for the given UUID, or null if the player is not currently muted. */
     public ActiveMute getActiveMute(UUID uuid) {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                     "SELECT reason, expiry FROM mutes WHERE uuid = ? AND active = 1 AND expiry > ?")) {
+                     "SELECT reason, expiry FROM mutes WHERE uuid = ? AND active = 1 AND expiry > UTC_TIMESTAMP()")) {
             ps.setString(1, uuid.toString());
-            ps.setLong(2, System.currentTimeMillis());
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) return new ActiveMute(rs.getString("reason"), rs.getLong("expiry"));
+                if (rs.next()) {
+                    Instant expiry = rs.getTimestamp("expiry").toInstant();
+                    return new ActiveMute(rs.getString("reason"), expiry);
+                }
             }
         } catch (SQLException e) {
             plugin.getLogger().severe("Failed to query active mute for " + uuid + ": " + e.getMessage());
@@ -101,10 +116,11 @@ public class DatabaseManager {
         return null;
     }
 
-    public void saveMuteToDB(UUID uuid, String name, String staff, String reason, long expiry, long now) {
+    public void saveMuteToDB(UUID uuid, String name, String staff, String reason, Instant expiry, Instant createdAt) {
         executeUpdate(
                 "INSERT INTO mutes (uuid, target_name, staff_name, reason, expiry, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                uuid.toString(), name, staff, reason, expiry, now);
+                uuid.toString(), name, staff, reason,
+                Timestamp.from(expiry), Timestamp.from(createdAt));
     }
 
     /**
@@ -195,35 +211,37 @@ public class DatabaseManager {
                 ps.setInt(3, pageSize);
                 ps.setInt(4, offset);
                 try (ResultSet rs = ps.executeQuery()) {
-                    long now = System.currentTimeMillis();
+                    Instant now = Instant.now();
                     while (rs.next()) {
-                        int id        = rs.getInt("id");
-                        long expiry   = rs.getLong("expiry");
-                        long created  = rs.getLong("created_at");
-                        String staff  = rs.getString("staff_name");
-                        String reason = rs.getString("reason");
-                        String unmutedBy = rs.getString("unmuted_by");
+                        int     id        = rs.getInt("id");
+                        Instant expiry    = rs.getTimestamp("expiry").toInstant();
+                        Instant createdAt = rs.getTimestamp("created_at").toInstant();
+                        String  staff     = rs.getString("staff_name");
+                        String  reason    = rs.getString("reason");
+                        String  unmutedBy = rs.getString("unmuted_by");
 
                         String statusText;
                         String timeLeftText = "";
 
                         if (unmutedBy != null) {
                             statusText = unmutedBy.contains("Overwritten") ? "§c[Overwritten]" : "§7[Unmuted]";
-                        } else if (expiry >= PERMANENT_EXPIRY) {
+                        } else if (!expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)) {
                             statusText = "§4[Permanent]";
-                        } else if (now >= expiry) {
+                        } else if (!now.isBefore(expiry)) {
                             statusText = "§8[Expired]";
                         } else {
-                            statusText = "§c[Active]";
-                            timeLeftText = " §8(§e" + TimeUtil.formatLongTime(expiry - now) + " left§8)";
+                            statusText   = "§c[Active]";
+                            timeLeftText = " §8(§e" + TimeUtil.formatDuration(now, expiry) + " left§8)";
                         }
 
                         lines.add("§8§m--------------------------------------\n" +
                                 "§6ID: #" + id + "  " + statusText + timeLeftText + " §7Staff: " + staff + "\n" +
                                 "§7Reason: §f" + reason + "\n" +
-                                "§7Date: §f" + estFormat.format(new Date(created)) +
-                                (expiry < PERMANENT_EXPIRY ? "\n§7Length: §f" + TimeUtil.formatLongTime(expiry - created) : "") +
-                                (unmutedBy != null && !unmutedBy.contains("Overwritten") ? "\n§7Unmuted by: §f" + unmutedBy : ""));
+                                "§7Date: §f" + displayFormatter.format(createdAt) +
+                                (expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)
+                                        ? "\n§7Length: §f" + TimeUtil.formatDuration(createdAt, expiry) : "") +
+                                (unmutedBy != null && !unmutedBy.contains("Overwritten")
+                                        ? "\n§7Unmuted by: §f" + unmutedBy : ""));
                     }
                 }
             }

@@ -4,6 +4,9 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.Arrays;
 
 public class MuteCommandHandler {
@@ -49,40 +52,40 @@ public class MuteCommandHandler {
         if (reason.trim().isEmpty()) { sender.sendMessage("§cError: A reason is required."); return true; }
 
         String durationInput = args[1].toLowerCase();
-        long expiry;
+        Instant expiry;
         boolean isPerm;
 
         if (durationInput.equals("perm")) {
             isPerm = true;
-            expiry = LabyMutePlugin.PERMANENT_EXPIRY;
+            expiry = TimeUtil.PERMANENT_EXPIRY;
         } else {
-            long durationMillis = TimeUtil.parseTimeStrict(durationInput);
-            if (durationMillis <= 0) { sender.sendMessage("§cInvalid duration format."); return true; }
-            if (durationMillis >= LabyMutePlugin.ONE_YEAR_MILLIS) {
+            expiry = TimeUtil.parseExpiry(durationInput);
+            if (expiry == null) { sender.sendMessage("§cInvalid duration format."); return true; }
+            Instant oneYearFromNow = ZonedDateTime.now(ZoneOffset.UTC).plusYears(1).toInstant();
+            if (!expiry.isBefore(oneYearFromNow)) {
                 isPerm = true;
-                expiry = LabyMutePlugin.PERMANENT_EXPIRY;
+                expiry = TimeUtil.PERMANENT_EXPIRY;
                 sender.sendMessage("§eNote: Over 1 year defaults to permanent.");
             } else {
                 isPerm = false;
-                expiry = System.currentTimeMillis() + durationMillis;
             }
         }
 
-        final long finalExpiry = expiry;
+        final Instant finalExpiry = expiry;
         final boolean finalIsPerm = isPerm;
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            long now = System.currentTimeMillis();
+            Instant now = Instant.now();
             db.executeUpdate(
-                    "UPDATE mutes SET active = 0, unmuted_by = ? WHERE uuid = ? AND active = 1 AND expiry > ?",
-                    "Overwritten by " + sender.getName(), target.getUniqueId().toString(), now);
+                    "UPDATE mutes SET active = 0, unmuted_by = ? WHERE uuid = ? AND active = 1 AND expiry > UTC_TIMESTAMP()",
+                    "Overwritten by " + sender.getName(), target.getUniqueId().toString());
 
             db.saveMuteToDB(target.getUniqueId(), target.getName(), sender.getName(), reason, finalExpiry, now);
 
             Bukkit.getScheduler().runTask(plugin, () -> {
                 if (!target.isOnline()) return;
                 String displayTime = finalIsPerm ? "Permanent" : durationInput;
-                boolean applied = voice.mute(target, reason, finalExpiry);
+                boolean applied = voice.mute(target, reason, finalExpiry.toEpochMilli());
                 notifyStaff("§c" + sender.getName() + " §7Laby-muted §c" + target.getName() +
                         " §7(§c" + displayTime + "§7): §c" + reason);
                 if (!applied) {
@@ -101,8 +104,10 @@ public class MuteCommandHandler {
         if (!sender.hasPermission(STAFF_PERM)) { sender.sendMessage("§cNo permission."); return true; }
         if (args.length < 1) return false;
 
-        String nameOrUuid = args[0];
-        String unmuteReason = (args.length > 1) ? String.join(" ", Arrays.copyOfRange(args, 1, args.length)) : "No reason specified";
+        String nameOrUuid   = args[0];
+        String unmuteReason = (args.length > 1)
+                ? String.join(" ", Arrays.copyOfRange(args, 1, args.length))
+                : "No reason specified";
 
         // Capture on main thread — Bukkit.getPlayer() is not thread-safe
         Player target = Bukkit.getPlayer(nameOrUuid);
@@ -111,8 +116,9 @@ public class MuteCommandHandler {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             // Combine check + deactivate into one UPDATE — eliminates TOCTOU race
             int affected = db.executeUpdate(
-                    "UPDATE mutes SET active = 0, unmuted_by = ? WHERE (uuid = ? OR LOWER(target_name) = LOWER(?)) AND active = 1 AND expiry > ?",
-                    sender.getName(), uuidStr, nameOrUuid, System.currentTimeMillis());
+                    "UPDATE mutes SET active = 0, unmuted_by = ? " +
+                    "WHERE (uuid = ? OR LOWER(target_name) = LOWER(?)) AND active = 1 AND expiry > UTC_TIMESTAMP()",
+                    sender.getName(), uuidStr, nameOrUuid);
 
             if (affected == 0) {
                 Bukkit.getScheduler().runTask(plugin, () ->

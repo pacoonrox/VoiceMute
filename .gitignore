@@ -2,3 +2,5 @@ target/
 .idea/
 *.iml
 *.class
+# local project notes
+*.md

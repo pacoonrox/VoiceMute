@@ -1,6 +1,9 @@
 package me.pacotaco.laby;
 
-import java.util.concurrent.TimeUnit;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -8,45 +11,60 @@ public final class TimeUtil {
 
     private TimeUtil() {}
 
-    public static long parseTimeStrict(String input) {
-        if (input == null || input.isEmpty()) return -1;
-        Pattern fullPattern = Pattern.compile("^(\\d+(s|mo|h|d|w|m|y))+$");
-        if (!fullPattern.matcher(input.toLowerCase()).matches()) return -1;
-        Pattern partPattern = Pattern.compile("(\\d+)(s|mo|h|d|w|m|y)");
-        Matcher matcher = partPattern.matcher(input.toLowerCase());
-        long total = 0;
+    /** Sentinel used for permanent mutes — far-future datetime stored in the DB. */
+    public static final Instant PERMANENT_EXPIRY = Instant.parse("3000-01-01T00:00:00Z");
+
+    private static final Pattern FULL_PATTERN = Pattern.compile("^(\\d+(s|mo|m|h|d|w|y))+$");
+    private static final Pattern PART_PATTERN = Pattern.compile("(\\d+)(s|mo|m|h|d|w|y)");
+
+    /**
+     * Parses a duration string (e.g. "7d", "1h30m", "2mo") and returns the resulting
+     * expiry {@link Instant}. Months and years use calendar-aware addition. Returns
+     * {@code null} if the input is blank or does not match the expected format.
+     */
+    public static Instant parseExpiry(String input) {
+        if (input == null || input.isEmpty()) return null;
+        String lower = input.toLowerCase();
+        if (!FULL_PATTERN.matcher(lower).matches()) return null;
+
+        Matcher matcher = PART_PATTERN.matcher(lower);
+        ZonedDateTime result = ZonedDateTime.now(ZoneOffset.UTC);
         while (matcher.find()) {
             long value;
             try {
                 value = Long.parseLong(matcher.group(1));
             } catch (NumberFormatException e) {
-                return -1;
+                return null;
             }
-            String unit = matcher.group(2);
-            long unitMs = switch (unit) {
-                case "s"  -> 1_000L;
-                case "m"  -> 60_000L;
-                case "h"  -> 3_600_000L;
-                case "d"  -> 86_400_000L;
-                case "w"  -> 604_800_000L;
-                case "mo" -> 2_592_000_000L;
-                case "y"  -> 31_536_000_000L;
-                default   -> 0L;
+            result = switch (matcher.group(2)) {
+                case "s"  -> result.plusSeconds(value);
+                case "m"  -> result.plusMinutes(value);
+                case "h"  -> result.plusHours(value);
+                case "d"  -> result.plusDays(value);
+                case "w"  -> result.plusWeeks(value);
+                case "mo" -> result.plusMonths(value);
+                case "y"  -> result.plusYears(value);
+                default   -> result;
             };
-            if (unitMs > 0 && value > (Long.MAX_VALUE - total) / unitMs) return -1; // overflow guard
-            total += value * unitMs;
         }
-        return total > 0 ? total : -1;
+        Instant expiry = result.toInstant();
+        return expiry.isAfter(Instant.now()) ? expiry : null;
     }
 
-    public static String formatLongTime(long millis) {
-        long d = TimeUnit.MILLISECONDS.toDays(millis);
-        long h = TimeUnit.MILLISECONDS.toHours(millis) % 24;
-        long m = TimeUnit.MILLISECONDS.toMinutes(millis) % 60;
+    /**
+     * Formats the duration between two instants as a human-readable string,
+     * e.g. {@code "7d 3h 45m"}. Returns {@code "0m"} if the duration is zero or negative.
+     */
+    public static String formatDuration(Instant from, Instant to) {
+        Duration d = Duration.between(from, to);
+        if (d.isNegative() || d.isZero()) return "0m";
+        long days    = d.toDays();
+        long hours   = d.toHoursPart();
+        long minutes = d.toMinutesPart();
         StringBuilder sb = new StringBuilder();
-        if (d > 0) sb.append(d).append("d ");
-        if (h > 0) sb.append(h).append("h ");
-        if (m > 0) sb.append(m).append("m");
+        if (days > 0)    sb.append(days).append("d ");
+        if (hours > 0)   sb.append(hours).append("h ");
+        if (minutes > 0) sb.append(minutes).append("m");
         String result = sb.toString().trim();
         return result.isEmpty() ? "0m" : result;
     }

@@ -10,3 +10,6 @@ discord:
   enabled: false
   # Paste your Discord webhook URL here (Server Settings > Integrations > Webhooks)
   webhook-url: ""
+
+# Timezone used when displaying mute dates in /labyhist (e.g. UTC, America/New_York, Europe/Berlin)
+display-timezone: UTC

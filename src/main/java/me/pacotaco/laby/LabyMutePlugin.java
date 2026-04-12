@@ -10,17 +10,14 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.text.SimpleDateFormat;
-import java.util.TimeZone;
+import java.time.DateTimeException;
+import java.time.ZoneId;
 
 /**
- * LabyMutePlugin - Version 2.2
+ * LabyMutePlugin - Version 2.4
  * MySQL-backed mute system; Discord integration uses a plain webhook URL.
  */
 public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Listener {
-
-    public static final long PERMANENT_EXPIRY  = 32503680000000L;
-    public static final long ONE_YEAR_MILLIS   = 31536000000L;
 
     private DatabaseManager    db;
     private LabyVoiceManager   voice;
@@ -31,12 +28,17 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
     public void onEnable() {
         saveDefaultConfig();
 
-        SimpleDateFormat estFormat = new SimpleDateFormat("yyyy-MM-dd h:mm a (z)");
-        estFormat.setTimeZone(TimeZone.getTimeZone("America/New_York"));
+        ZoneId displayZone;
+        try {
+            displayZone = ZoneId.of(getConfig().getString("display-timezone", "UTC"));
+        } catch (DateTimeException e) {
+            getLogger().warning("Invalid display-timezone in config.yml — falling back to UTC.");
+            displayZone = ZoneId.of("UTC");
+        }
 
-        db      = new DatabaseManager(this, estFormat);
-        voice   = new LabyVoiceManager();
-        discord = new DiscordWebhook(this);
+        db       = new DatabaseManager(this, displayZone);
+        voice    = new LabyVoiceManager();
+        discord  = new DiscordWebhook(this);
         commands = new MuteCommandHandler(this, db, voice, discord);
 
         db.setupDatabase();
@@ -51,18 +53,18 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
         }
 
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("LabyMute v2.2 Enabled.");
+        getLogger().info("LabyMute v2.4 Enabled.");
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
         return switch (cmd.getName().toLowerCase()) {
-            case "labyreload"  -> commands.handleReload(sender);
-            case "labymute"    -> commands.handleMute(sender, args);
-            case "labyunmute"  -> commands.handleUnmute(sender, args);
-            case "labyhist"    -> commands.handleHistory(sender, args);
-            case "labyprune"   -> commands.handlePrune(sender, args);
-            default            -> false;
+            case "labyreload" -> commands.handleReload(sender);
+            case "labymute"   -> commands.handleMute(sender, args);
+            case "labyunmute" -> commands.handleUnmute(sender, args);
+            case "labyhist"   -> commands.handleHistory(sender, args);
+            case "labyprune"  -> commands.handlePrune(sender, args);
+            default           -> false;
         };
     }
 
@@ -74,7 +76,7 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
             if (mute != null) {
                 // Delay to allow LabyMod handshake to complete; guard against disconnect during delay
                 Bukkit.getScheduler().runTaskLater(this, () -> {
-                    if (player.isOnline()) voice.mute(player, mute.reason(), mute.expiry());
+                    if (player.isOnline()) voice.mute(player, mute.reason(), mute.expiry().toEpochMilli());
                 }, 60L);
             }
         });
