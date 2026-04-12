@@ -10,16 +10,12 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.text.SimpleDateFormat;
 import java.util.TimeZone;
 
 /**
- * LabyMutePlugin - Version 2.1
- * Refactored into separate classes; Discord integration now uses a plain webhook URL.
+ * LabyMutePlugin - Version 2.2
+ * MySQL-backed mute system; Discord integration uses a plain webhook URL.
  */
 public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Listener {
 
@@ -55,7 +51,7 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
         }
 
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("LabyMute v2.1 Enabled.");
+        getLogger().info("LabyMute v2.2 Enabled.");
     }
 
     @Override
@@ -74,21 +70,12 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            try (Connection conn = db.getConnection();
-                 PreparedStatement ps = conn.prepareStatement(
-                         "SELECT reason, expiry FROM mutes WHERE uuid = ? AND active = 1 AND expiry > ?")) {
-                ps.setString(1, player.getUniqueId().toString());
-                ps.setLong(2, System.currentTimeMillis());
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String reason = rs.getString("reason");
-                        long expiry   = rs.getLong("expiry");
-                        // Delay to allow LabyMod handshake to complete
-                        Bukkit.getScheduler().runTaskLater(this, () -> voice.mute(player, reason, expiry), 60L);
-                    }
-                }
-            } catch (SQLException e) {
-                getLogger().severe("Failed to re-apply mute on join for " + player.getName() + ": " + e.getMessage());
+            DatabaseManager.ActiveMute mute = db.getActiveMute(player.getUniqueId());
+            if (mute != null) {
+                // Delay to allow LabyMod handshake to complete; guard against disconnect during delay
+                Bukkit.getScheduler().runTaskLater(this, () -> {
+                    if (player.isOnline()) voice.mute(player, mute.reason(), mute.expiry());
+                }, 60L);
             }
         });
     }
@@ -96,5 +83,6 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
     @Override
     public void onDisable() {
         Bukkit.getScheduler().cancelTasks(this);
+        if (db != null) db.close();
     }
 }

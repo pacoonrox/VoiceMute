@@ -10,9 +10,9 @@ public final class TimeUtil {
 
     public static long parseTimeStrict(String input) {
         if (input == null || input.isEmpty()) return -1;
-        Pattern fullPattern = Pattern.compile("^(\\d+(s|m|h|d|w|mo|y))+$");
+        Pattern fullPattern = Pattern.compile("^(\\d+(s|mo|h|d|w|m|y))+$");
         if (!fullPattern.matcher(input.toLowerCase()).matches()) return -1;
-        Pattern partPattern = Pattern.compile("(\\d+)(s|m|h|d|w|mo|y)");
+        Pattern partPattern = Pattern.compile("(\\d+)(s|mo|h|d|w|m|y)");
         Matcher matcher = partPattern.matcher(input.toLowerCase());
         long total = 0;
         while (matcher.find()) {

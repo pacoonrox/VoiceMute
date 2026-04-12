@@ -1,7 +1,6 @@
 package me.pacotaco.laby;
 
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
@@ -81,10 +80,15 @@ public class MuteCommandHandler {
             db.saveMuteToDB(target.getUniqueId(), target.getName(), sender.getName(), reason, finalExpiry, now);
 
             Bukkit.getScheduler().runTask(plugin, () -> {
-                voice.mute(target, reason, finalExpiry);
+                if (!target.isOnline()) return;
                 String displayTime = finalIsPerm ? "Permanent" : durationInput;
+                boolean applied = voice.mute(target, reason, finalExpiry);
                 notifyStaff("§c" + sender.getName() + " §7Laby-muted §c" + target.getName() +
                         " §7(§c" + displayTime + "§7): §c" + reason);
+                if (!applied) {
+                    sender.sendMessage("§e[LabyMute] §7Note: §f" + target.getName() +
+                            " §7is not using LabyMod voice chat — mute saved to DB but not applied live.");
+                }
                 target.sendMessage("§cYou have been Laby-muted from VoiceChat for: §f" + reason);
             });
 
@@ -105,16 +109,21 @@ public class MuteCommandHandler {
         String uuidStr = (target != null) ? target.getUniqueId().toString() : nameOrUuid;
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            // Combine check + deactivate into one UPDATE — eliminates TOCTOU race
+            int affected = db.executeUpdate(
+                    "UPDATE mutes SET active = 0, unmuted_by = ? WHERE (uuid = ? OR LOWER(target_name) = LOWER(?)) AND active = 1 AND expiry > ?",
+                    sender.getName(), uuidStr, nameOrUuid, System.currentTimeMillis());
 
-            if (!db.isCurrentlyMuted(uuidStr, nameOrUuid)) {
+            if (affected == 0) {
                 Bukkit.getScheduler().runTask(plugin, () ->
                         sender.sendMessage("§cTarget is not currently laby-muted."));
                 return;
             }
-
-            db.executeUpdate(
-                    "UPDATE mutes SET active = 0, unmuted_by = ? WHERE (uuid = ? OR LOWER(target_name) = LOWER(?)) AND active = 1 AND expiry > ?",
-                    sender.getName(), uuidStr, nameOrUuid, System.currentTimeMillis());
+            if (affected < 0) {
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        sender.sendMessage("§cDatabase error while attempting to unmute."));
+                return;
+            }
 
             String canonical = (target != null) ? target.getName() : db.getCanonicalName(uuidStr, nameOrUuid);
             final String displayName = (canonical != null) ? canonical : nameOrUuid;
@@ -171,6 +180,6 @@ public class MuteCommandHandler {
         for (Player p : Bukkit.getOnlinePlayers()) {
             if (p.hasPermission(STAFF_PERM)) p.sendMessage(message);
         }
-        Bukkit.getConsoleSender().sendMessage(ChatColor.stripColor(message));
+        Bukkit.getConsoleSender().sendMessage(message.replaceAll("§[0-9a-fk-orA-FK-OR]", ""));
     }
 }

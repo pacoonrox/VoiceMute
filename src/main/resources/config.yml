@@ -1,4 +1,12 @@
+mysql:
+  host: localhost
+  port: 3306
+  database: voicemute
+  username: root
+  password: ""
+  ssl: false
+
 discord:
-  enabled: true
+  enabled: false
   # Paste your Discord webhook URL here (Server Settings > Integrations > Webhooks)
   webhook-url: ""

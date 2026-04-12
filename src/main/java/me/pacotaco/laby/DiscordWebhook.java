@@ -1,9 +1,11 @@
 package me.pacotaco.laby;
 
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 
 /**
@@ -13,8 +15,12 @@ import java.time.Instant;
 public class DiscordWebhook {
 
     // Orange (255, 170, 0) and Green (85, 255, 85) as decimal integers
-    private static final int COLOR_MUTE   = 0xFFAA00; // 16755200
-    private static final int COLOR_UNMUTE = 0x55FF55; // 5570389
+    private static final int COLOR_MUTE   = 0xFFAA00;
+    private static final int COLOR_UNMUTE = 0x55FF55;
+
+    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
 
     private final LabyMutePlugin plugin;
 
@@ -33,7 +39,7 @@ public class DiscordWebhook {
                 field("Reason", reason, true)
         );
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> post(webhookUrl, json));
+        post(webhookUrl, json);
     }
 
     public void sendUnmute(String target, String staff, String reason) {
@@ -47,7 +53,7 @@ public class DiscordWebhook {
                 field("Reason", reason, true)
         );
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> post(webhookUrl, json));
+        post(webhookUrl, json);
     }
 
     // -------------------------------------------------------------------------
@@ -61,20 +67,17 @@ public class DiscordWebhook {
 
     private void post(String webhookUrl, String json) {
         try {
-            HttpURLConnection conn = (HttpURLConnection) new URL(webhookUrl).openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(json.getBytes(StandardCharsets.UTF_8));
-            }
-            int code = conn.getResponseCode();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(webhookUrl))
+                    .header("Content-Type", "application/json")
+                    .timeout(Duration.ofSeconds(5))
+                    .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<Void> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.discarding());
+            int code = response.statusCode();
             if (code < 200 || code >= 300) {
                 plugin.getLogger().warning("Discord webhook returned HTTP " + code);
             }
-            conn.disconnect();
         } catch (Exception e) {
             plugin.getLogger().warning("Failed to send Discord webhook: " + e.getMessage());
         }
