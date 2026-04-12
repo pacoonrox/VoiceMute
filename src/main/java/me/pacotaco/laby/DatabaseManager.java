@@ -20,7 +20,7 @@ public class DatabaseManager {
     public record ActiveMute(String reason, Instant expiry) {}
 
     private final LabyMutePlugin plugin;
-    private final DateTimeFormatter displayFormatter;
+    private DateTimeFormatter displayFormatter;
     private HikariDataSource dataSource;
 
     public DatabaseManager(LabyMutePlugin plugin, ZoneId displayZone) {
@@ -45,7 +45,8 @@ public class DatabaseManager {
                 + "?useSSL=" + useSSL
                 + "&allowPublicKeyRetrieval=true"
                 + "&characterEncoding=UTF-8"
-                + "&serverTimezone=UTC");
+                + "&connectionTimeZone=UTC"
+                + "&forceConnectionTimeZoneToSession=true");
         config.setUsername(username);
         config.setPassword(password);
         config.setMaximumPoolSize(10);
@@ -57,8 +58,11 @@ public class DatabaseManager {
         Logger.getLogger("me.pacotaco.laby.libs.hikari").setLevel(Level.WARNING);
 
         try {
-            dataSource = new HikariDataSource(config);
-            try (Connection conn = getConnection(); Statement s = conn.createStatement()) {
+            // Build pool as a local first — only assign to dataSource after full success
+            // so that a PoolInitializationException (RuntimeException) or any other failure
+            // never leaves the plugin in a half-initialised state.
+            HikariDataSource newSource = new HikariDataSource(config);
+            try (Connection conn = newSource.getConnection(); Statement s = conn.createStatement()) {
                 // Create table with proper DATETIME columns on fresh installs
                 s.execute("CREATE TABLE IF NOT EXISTS mutes (" +
                         "id INT AUTO_INCREMENT PRIMARY KEY, " +
@@ -86,9 +90,19 @@ public class DatabaseManager {
                         plugin.getLogger().info("Migration complete.");
                     }
                 }
+
+                // Add unmute_reason column if this is an older install without it
+                try (ResultSet rs = conn.getMetaData().getColumns(null, null, "mutes", "unmute_reason")) {
+                    if (!rs.next()) {
+                        s.execute("ALTER TABLE mutes ADD COLUMN unmute_reason TEXT DEFAULT NULL");
+                        plugin.getLogger().info("Added unmute_reason column to mutes table.");
+                    }
+                }
             }
+            // Everything succeeded — publish the new pool
+            dataSource = newSource;
             plugin.getLogger().info("Connected to MySQL database.");
-        } catch (SQLException e) {
+        } catch (Exception e) {
             plugin.getLogger().severe("Could not connect to MySQL database: " + e.getMessage());
             e.printStackTrace();
         }
@@ -96,6 +110,28 @@ public class DatabaseManager {
 
     public void close() {
         if (dataSource != null && !dataSource.isClosed()) dataSource.close();
+    }
+
+    /**
+     * Updates the timezone formatter and attempts to reconnect using the current config values.
+     * The old pool is kept alive until the new one is fully established; if reconnect fails,
+     * the old pool is restored so in-flight queries are unaffected.
+     */
+    public void reinitialize(ZoneId newZone) {
+        this.displayFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd h:mm a (z)").withZone(newZone);
+
+        HikariDataSource oldSource = this.dataSource;
+        this.dataSource = null;      // setupDatabase() assigns on success only
+        setupDatabase();
+
+        if (this.dataSource != null) {
+            // New pool is ready — close old one
+            if (oldSource != null && !oldSource.isClosed()) oldSource.close();
+        } else {
+            // Reconnect failed — restore old pool and warn
+            this.dataSource = oldSource;
+            plugin.getLogger().warning("Database reconnect failed during reload — continuing with existing connection.");
+        }
     }
 
     /** Returns the active mute for the given UUID, or null if the player is not currently muted. */
@@ -106,7 +142,8 @@ public class DatabaseManager {
             ps.setString(1, uuid.toString());
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    Instant expiry = rs.getTimestamp("expiry").toInstant();
+                    Timestamp expiryTs = rs.getTimestamp("expiry");
+                    Instant expiry = (expiryTs != null) ? expiryTs.toInstant() : TimeUtil.PERMANENT_EXPIRY;
                     return new ActiveMute(rs.getString("reason"), expiry);
                 }
             }
@@ -213,12 +250,15 @@ public class DatabaseManager {
                 try (ResultSet rs = ps.executeQuery()) {
                     Instant now = Instant.now();
                     while (rs.next()) {
-                        int     id        = rs.getInt("id");
-                        Instant expiry    = rs.getTimestamp("expiry").toInstant();
-                        Instant createdAt = rs.getTimestamp("created_at").toInstant();
-                        String  staff     = rs.getString("staff_name");
-                        String  reason    = rs.getString("reason");
-                        String  unmutedBy = rs.getString("unmuted_by");
+                        int       id          = rs.getInt("id");
+                        Timestamp expiryTs    = rs.getTimestamp("expiry");
+                        Timestamp createdTs   = rs.getTimestamp("created_at");
+                        Instant   expiry      = (expiryTs != null)  ? expiryTs.toInstant()  : TimeUtil.PERMANENT_EXPIRY;
+                        Instant   createdAt   = (createdTs != null) ? createdTs.toInstant() : Instant.EPOCH;
+                        String    staff       = rs.getString("staff_name");
+                        String    reason      = rs.getString("reason");
+                        String    unmutedBy   = rs.getString("unmuted_by");
+                        String    unmuteReason = rs.getString("unmute_reason");
 
                         String statusText;
                         String timeLeftText = "";
@@ -241,7 +281,9 @@ public class DatabaseManager {
                                 (expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)
                                         ? "\n§7Length: §f" + TimeUtil.formatDuration(createdAt, expiry) : "") +
                                 (unmutedBy != null && !unmutedBy.contains("Overwritten")
-                                        ? "\n§7Unmuted by: §f" + unmutedBy : ""));
+                                        ? "\n§7Unmuted by: §f" + unmutedBy +
+                                          (unmuteReason != null ? " §8(§7" + unmuteReason + "§8)" : "")
+                                        : ""));
                     }
                 }
             }

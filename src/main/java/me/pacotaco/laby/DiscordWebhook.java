@@ -66,21 +66,29 @@ public class DiscordWebhook {
     }
 
     private void post(String webhookUrl, String json) {
+        HttpRequest request;
         try {
-            HttpRequest request = HttpRequest.newBuilder()
+            request = HttpRequest.newBuilder()
                     .uri(URI.create(webhookUrl))
                     .header("Content-Type", "application/json")
                     .timeout(Duration.ofSeconds(5))
                     .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
                     .build();
-            HttpResponse<Void> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.discarding());
-            int code = response.statusCode();
-            if (code < 200 || code >= 300) {
-                plugin.getLogger().warning("Discord webhook returned HTTP " + code);
-            }
         } catch (Exception e) {
-            plugin.getLogger().warning("Failed to send Discord webhook: " + e.getMessage());
+            plugin.getLogger().warning("Failed to build Discord webhook request: " + e.getMessage());
+            return;
         }
+        HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                .thenAccept(response -> {
+                    int code = response.statusCode();
+                    if (code < 200 || code >= 300) {
+                        plugin.getLogger().warning("Discord webhook returned HTTP " + code);
+                    }
+                })
+                .exceptionally(e -> {
+                    plugin.getLogger().warning("Failed to send Discord webhook: " + e.getMessage());
+                    return null;
+                });
     }
 
     // -------------------------------------------------------------------------

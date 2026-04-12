@@ -33,8 +33,7 @@ public class MuteCommandHandler {
 
     public boolean handleReload(CommandSender sender) {
         if (!sender.hasPermission(ADMIN_PERM)) { sender.sendMessage("§cNo permission."); return true; }
-        plugin.reloadConfig();
-        sender.sendMessage("§8[§6LabyMute§8] §aConfiguration reloaded!");
+        plugin.reload(sender);
         return true;
     }
 
@@ -50,6 +49,7 @@ public class MuteCommandHandler {
 
         String reason = (args.length > 2) ? String.join(" ", Arrays.copyOfRange(args, 2, args.length)) : "";
         if (reason.trim().isEmpty()) { sender.sendMessage("§cError: A reason is required."); return true; }
+        if (reason.length() > 512) { sender.sendMessage("§cReason is too long (max 512 characters)."); return true; }
 
         String durationInput = args[1].toLowerCase();
         Instant expiry;
@@ -65,7 +65,7 @@ public class MuteCommandHandler {
             if (!expiry.isBefore(oneYearFromNow)) {
                 isPerm = true;
                 expiry = TimeUtil.PERMANENT_EXPIRY;
-                sender.sendMessage("§eNote: Over 1 year defaults to permanent.");
+                sender.sendMessage("§eNote: 1 year or more defaults to permanent.");
             } else {
                 isPerm = false;
             }
@@ -116,9 +116,9 @@ public class MuteCommandHandler {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             // Combine check + deactivate into one UPDATE — eliminates TOCTOU race
             int affected = db.executeUpdate(
-                    "UPDATE mutes SET active = 0, unmuted_by = ? " +
+                    "UPDATE mutes SET active = 0, unmuted_by = ?, unmute_reason = ? " +
                     "WHERE (uuid = ? OR LOWER(target_name) = LOWER(?)) AND active = 1 AND expiry > UTC_TIMESTAMP()",
-                    sender.getName(), uuidStr, nameOrUuid);
+                    sender.getName(), unmuteReason, uuidStr, nameOrUuid);
 
             if (affected == 0) {
                 Bukkit.getScheduler().runTask(plugin, () ->
@@ -166,7 +166,11 @@ public class MuteCommandHandler {
         try {
             entryId = Integer.parseInt(args[1]);
         } catch (NumberFormatException e) {
-            sender.sendMessage("§cInvalid ID — must be a number.");
+            sender.sendMessage("§cInvalid ID — must be a positive number.");
+            return true;
+        }
+        if (entryId <= 0) {
+            sender.sendMessage("§cInvalid ID — must be a positive number.");
             return true;
         }
 

@@ -1,5 +1,5 @@
 name: LabyMutePlugin
-version: 2.3
+version: 2.5
 main: me.pacotaco.laby.LabyMutePlugin
 api-version: '1.21'
 description: A MySQL-backed LabyMod mute and history system with Discord webhook logging.

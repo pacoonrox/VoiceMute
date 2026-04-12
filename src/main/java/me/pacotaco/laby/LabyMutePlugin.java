@@ -12,9 +12,10 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.time.DateTimeException;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 
 /**
- * LabyMutePlugin - Version 2.4
+ * LabyMutePlugin - Version 2.5
  * MySQL-backed mute system; Discord integration uses a plain webhook URL.
  */
 public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Listener {
@@ -37,7 +38,7 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
         }
 
         db       = new DatabaseManager(this, displayZone);
-        voice    = new LabyVoiceManager();
+        voice    = new LabyVoiceManager(this);
         discord  = new DiscordWebhook(this);
         commands = new MuteCommandHandler(this, db, voice, discord);
 
@@ -53,7 +54,13 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
         }
 
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("LabyMute v2.4 Enabled.");
+
+        if (!ZoneId.systemDefault().equals(ZoneOffset.UTC)) {
+            getLogger().warning("JVM timezone is " + ZoneId.systemDefault() +
+                    ", not UTC. Add -Duser.timezone=UTC to your start command to prevent timestamp issues.");
+        }
+
+        getLogger().info("LabyMute v2.5 Enabled.");
     }
 
     @Override
@@ -80,6 +87,20 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
                 }, 60L);
             }
         });
+    }
+
+    /** Full config reload: re-reads YAML, reconnects to DB with any new credentials, updates timezone formatter. */
+    public void reload(CommandSender sender) {
+        reloadConfig();
+        ZoneId newZone;
+        try {
+            newZone = ZoneId.of(getConfig().getString("display-timezone", "UTC"));
+        } catch (DateTimeException e) {
+            sender.sendMessage("§e[LabyMute] Warning: Invalid display-timezone in config — keeping UTC.");
+            newZone = ZoneId.of("UTC");
+        }
+        db.reinitialize(newZone);
+        sender.sendMessage("§8[§6LabyMute§8] §aConfiguration reloaded — database reconnected.");
     }
 
     @Override

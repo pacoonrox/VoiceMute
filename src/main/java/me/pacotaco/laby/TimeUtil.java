@@ -36,16 +36,20 @@ public final class TimeUtil {
             } catch (NumberFormatException e) {
                 return null;
             }
-            result = switch (matcher.group(2)) {
-                case "s"  -> result.plusSeconds(value);
-                case "m"  -> result.plusMinutes(value);
-                case "h"  -> result.plusHours(value);
-                case "d"  -> result.plusDays(value);
-                case "w"  -> result.plusWeeks(value);
-                case "mo" -> result.plusMonths(value);
-                case "y"  -> result.plusYears(value);
-                default   -> result;
-            };
+            try {
+                result = switch (matcher.group(2)) {
+                    case "s"  -> result.plusSeconds(value);
+                    case "m"  -> result.plusMinutes(value);
+                    case "h"  -> result.plusHours(value);
+                    case "d"  -> result.plusDays(value);
+                    case "w"  -> result.plusWeeks(value);
+                    case "mo" -> result.plusMonths(value);
+                    case "y"  -> result.plusYears(value);
+                    default   -> result;
+                };
+            } catch (ArithmeticException | java.time.DateTimeException e) {
+                return null;
+            }
         }
         Instant expiry = result.toInstant();
         return expiry.isAfter(Instant.now()) ? expiry : null;
@@ -53,20 +57,23 @@ public final class TimeUtil {
 
     /**
      * Formats the duration between two instants as a human-readable string,
-     * e.g. {@code "7d 3h 45m"}. Returns {@code "0m"} if the duration is zero or negative.
+     * e.g. {@code "7d 3h 45m"}. Returns {@code "0s"} if the duration is zero or negative.
      */
     public static String formatDuration(Instant from, Instant to) {
         Duration d = Duration.between(from, to);
-        if (d.isNegative() || d.isZero()) return "0m";
+        if (d.isNegative() || d.isZero()) return "0s";
         long days    = d.toDays();
         long hours   = d.toHoursPart();
         long minutes = d.toMinutesPart();
+        long seconds = d.toSecondsPart();
         StringBuilder sb = new StringBuilder();
         if (days > 0)    sb.append(days).append("d ");
         if (hours > 0)   sb.append(hours).append("h ");
         if (minutes > 0) sb.append(minutes).append("m");
         String result = sb.toString().trim();
-        return result.isEmpty() ? "0m" : result;
+        // Fall back to seconds for sub-minute durations
+        if (result.isEmpty()) return seconds > 0 ? seconds + "s" : "0s";
+        return result;
     }
 
     public static int tryParseInt(String s) {
