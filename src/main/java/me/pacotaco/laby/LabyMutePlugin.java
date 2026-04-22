@@ -8,11 +8,15 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.time.DateTimeException;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * LabyMutePlugin - Version 2.5
@@ -24,6 +28,9 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
     private LabyVoiceManager   voice;
     private DiscordWebhook     discord;
     private MuteCommandHandler commands;
+
+    /** UUIDs of online players who currently have a LabyMod mute applied. */
+    private final Set<UUID> activeMutes = ConcurrentHashMap.newKeySet();
 
     @Override
     public void onEnable() {
@@ -55,6 +62,25 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
 
         getServer().getPluginManager().registerEvents(this, this);
 
+        // Poll every 5 seconds: apply new mutes picked up from DB, and lift expired/removed ones
+        Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                UUID uuid = player.getUniqueId();
+                DatabaseManager.ActiveMute mute = db.getActiveMute(uuid);
+                if (mute != null && activeMutes.add(uuid)) {
+                    // Mute exists in DB but wasn't tracked — apply it
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        if (player.isOnline()) voice.mute(player, mute.reason(), mute.expiry().toEpochMilli());
+                    });
+                } else if (mute == null && activeMutes.remove(uuid)) {
+                    // Mute was removed/expired in DB — lift it
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        if (player.isOnline()) voice.unmute(player);
+                    });
+                }
+            }
+        }, 100L, 100L); // 5-second interval
+
         if (!ZoneId.systemDefault().equals(ZoneOffset.UTC)) {
             getLogger().warning("JVM timezone is " + ZoneId.systemDefault() +
                     ", not UTC. Add -Duser.timezone=UTC to your start command to prevent timestamp issues.");
@@ -81,6 +107,7 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             DatabaseManager.ActiveMute mute = db.getActiveMute(player.getUniqueId());
             if (mute != null) {
+                activeMutes.add(player.getUniqueId());
                 // Delay to allow LabyMod handshake to complete; guard against disconnect during delay
                 Bukkit.getScheduler().runTaskLater(this, () -> {
                     if (player.isOnline()) voice.mute(player, mute.reason(), mute.expiry().toEpochMilli());
@@ -88,6 +115,14 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
             }
         });
     }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        activeMutes.remove(event.getPlayer().getUniqueId());
+    }
+
+    void markMuted(UUID uuid)   { activeMutes.add(uuid); }
+    void markUnmuted(UUID uuid) { activeMutes.remove(uuid); }
 
     /** Full config reload: re-reads YAML, reconnects to DB with any new credentials, updates timezone formatter. */
     public void reload(CommandSender sender) {

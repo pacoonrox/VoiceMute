@@ -1,6 +1,7 @@
 package me.pacotaco.laby;
 
 import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
@@ -8,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
+import java.util.UUID;
 
 public class MuteCommandHandler {
 
@@ -41,11 +43,19 @@ public class MuteCommandHandler {
         if (!sender.hasPermission(STAFF_PERM)) { sender.sendMessage("§cNo permission."); return true; }
         if (args.length < 2) { sender.sendMessage("§cUsage: /labymute <player> <duration/perm> <reason>"); return true; }
 
-        Player target = Bukkit.getPlayer(args[0]);
-        if (target == null) {
-            sender.sendMessage("§cPlayer must be online to issue a LabyMod mute.");
+        // Online lookup first; for offline, pull from usercache via getOfflinePlayer (safe — player has joined before)
+        Player onlineTarget = Bukkit.getPlayer(args[0]);
+        @SuppressWarnings("deprecation")
+        OfflinePlayer offlineTarget = (onlineTarget != null) ? onlineTarget : Bukkit.getOfflinePlayer(args[0]);
+
+        if (onlineTarget == null && !offlineTarget.hasPlayedBefore()) {
+            sender.sendMessage("§cPlayer not found. They must have joined the server at least once.");
             return true;
         }
+
+        UUID targetUuid = offlineTarget.getUniqueId();
+        String targetName = (offlineTarget.getName() != null) ? offlineTarget.getName() : args[0];
+        boolean isOnline = onlineTarget != null;
 
         String reason = (args.length > 2) ? String.join(" ", Arrays.copyOfRange(args, 2, args.length)) : "";
         if (reason.trim().isEmpty()) { sender.sendMessage("§cError: A reason is required."); return true; }
@@ -78,24 +88,29 @@ public class MuteCommandHandler {
             Instant now = Instant.now();
             db.executeUpdate(
                     "UPDATE mutes SET active = 0, unmuted_by = ? WHERE uuid = ? AND active = 1 AND expiry > UTC_TIMESTAMP()",
-                    "Overwritten by " + sender.getName(), target.getUniqueId().toString());
+                    "Overwritten by " + sender.getName(), targetUuid.toString());
 
-            db.saveMuteToDB(target.getUniqueId(), target.getName(), sender.getName(), reason, finalExpiry, now);
+            db.saveMuteToDB(targetUuid, targetName, sender.getName(), reason, finalExpiry, now);
 
             Bukkit.getScheduler().runTask(plugin, () -> {
-                if (!target.isOnline()) return;
                 String displayTime = finalIsPerm ? "Permanent" : durationInput;
-                boolean applied = voice.mute(target, reason, finalExpiry.toEpochMilli());
-                notifyStaff("§c" + sender.getName() + " §7Laby-muted §c" + target.getName() +
-                        " §7(§c" + displayTime + "§7): §c" + reason);
-                if (!applied) {
-                    sender.sendMessage("§e[LabyMute] §7Note: §f" + target.getName() +
-                            " §7is not using LabyMod voice chat — mute saved to DB but not applied live.");
+                if (isOnline) {
+                    boolean applied = voice.mute(onlineTarget, reason, finalExpiry.toEpochMilli());
+                    plugin.markMuted(targetUuid);
+                    notifyStaff("§c" + sender.getName() + " §7Laby-muted §c" + targetName +
+                            " §7(§c" + displayTime + "§7): §c" + reason);
+                    if (!applied) {
+                        sender.sendMessage("§e[LabyMute] §7Note: §f" + targetName +
+                                " §7is not using LabyMod voice chat — mute saved to DB but not applied live.");
+                    }
+                    onlineTarget.sendMessage("§cYou have been Laby-muted from VoiceChat for: §f" + reason);
+                } else {
+                    notifyStaff("§c" + sender.getName() + " §7Laby-muted §c" + targetName +
+                            " §7(§c" + displayTime + "§7): §c" + reason);
                 }
-                target.sendMessage("§cYou have been Laby-muted from VoiceChat for: §f" + reason);
             });
 
-            discord.sendMute(target.getName(), finalIsPerm ? "Permanent" : durationInput, reason);
+            discord.sendMute(targetName, finalIsPerm ? "Permanent" : durationInput, reason);
         });
         return true;
     }
@@ -136,6 +151,7 @@ public class MuteCommandHandler {
 
             Bukkit.getScheduler().runTask(plugin, () -> {
                 if (target != null) {
+                    plugin.markUnmuted(target.getUniqueId());
                     voice.unmute(target);
                     target.sendMessage("§aYour LabyMod VoiceChat mute has been lifted.");
                 }
