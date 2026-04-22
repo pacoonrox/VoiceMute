@@ -5,6 +5,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.*;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -96,6 +98,39 @@ public class DatabaseManager {
                     if (!rs.next()) {
                         s.execute("ALTER TABLE mutes ADD COLUMN unmute_reason TEXT DEFAULT NULL");
                         plugin.getLogger().info("Added unmute_reason column to mutes table.");
+                    }
+                }
+
+                // Connection tracking table — maps UUID+IP pairs for alt-account detection
+                // ip is stored as a SHA-256 hex hash (CHAR(64)) — never stored in plain text
+                s.execute("CREATE TABLE IF NOT EXISTS connections (" +
+                        "uuid CHAR(36) NOT NULL, " +
+                        "ip CHAR(64) NOT NULL, " +
+                        "name VARCHAR(16) NOT NULL, " +
+                        "last_seen DATETIME NOT NULL, " +
+                        "PRIMARY KEY (uuid, ip), " +
+                        "INDEX idx_conn_ip (ip)" +
+                        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+                // Migrate plain-text IPs to SHA-256 hashes (column was VARCHAR(45) before v2.7)
+                try (ResultSet colRs = conn.getMetaData().getColumns(null, null, "connections", "ip")) {
+                    if (colRs.next() && colRs.getInt("COLUMN_SIZE") <= 45) {
+                        plugin.getLogger().info("Migrating connections table: plain-text IPs → SHA-256 hashes...");
+                        List<String[]> rows = new ArrayList<>();
+                        try (ResultSet rs = s.executeQuery("SELECT uuid, ip FROM connections")) {
+                            while (rs.next()) rows.add(new String[]{rs.getString(1), rs.getString(2)});
+                        }
+                        s.execute("ALTER TABLE connections MODIFY ip CHAR(64) NOT NULL");
+                        try (PreparedStatement upd = conn.prepareStatement(
+                                "UPDATE connections SET ip = ? WHERE uuid = ? AND ip = ?")) {
+                            for (String[] row : rows) {
+                                upd.setString(1, hashIp(row[1]));
+                                upd.setString(2, row[0]);
+                                upd.setString(3, row[1]);
+                                upd.executeUpdate();
+                            }
+                        }
+                        plugin.getLogger().info("IP migration complete.");
                     }
                 }
             }
@@ -190,6 +225,74 @@ public class DatabaseManager {
         }
     }
 
+    /** SHA-256 hashes an IP address. The hash is what gets stored and queried — the raw IP never touches the DB. */
+    private static String hashIp(String ip) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(ip.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : hash) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 unavailable", e); // can't happen on any standard JVM
+        }
+    }
+
+    /** Records or refreshes a player's UUID↔IP mapping. The IP is hashed before storage. */
+    public void recordConnection(UUID uuid, String ip, String name) {
+        executeUpdate(
+                "INSERT INTO connections (uuid, ip, name, last_seen) VALUES (?, ?, ?, UTC_TIMESTAMP()) " +
+                "ON DUPLICATE KEY UPDATE name = VALUES(name), last_seen = UTC_TIMESTAMP()",
+                uuid.toString(), hashIp(ip), name);
+    }
+
+    /**
+     * Returns an active mute associated with any UUID that has connected from the given IP,
+     * or null if no IP-linked mute exists. Used as a fallback when UUID lookup finds nothing.
+     */
+    public ActiveMute getActiveMuteByIP(String ip) {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT m.reason, m.expiry FROM mutes m " +
+                     "JOIN connections c ON c.uuid = m.uuid " +
+                     "WHERE c.ip = ? AND m.active = 1 AND m.expiry > UTC_TIMESTAMP() LIMIT 1")) {
+            ps.setString(1, hashIp(ip));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    Timestamp expiryTs = rs.getTimestamp("expiry");
+                    Instant expiry = (expiryTs != null) ? expiryTs.toInstant() : TimeUtil.PERMANENT_EXPIRY;
+                    return new ActiveMute(rs.getString("reason"), expiry);
+                }
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().severe("Failed to query active mute by IP: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Returns the display names of all other accounts that have connected from an IP
+     * also used by the given UUID. IPs are never returned — only names.
+     */
+    public List<String> getLinkedAccountNames(String uuidStr) {
+        List<String> names = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT DISTINCT c2.name FROM connections c1 " +
+                     "JOIN connections c2 ON c1.ip = c2.ip " +
+                     "WHERE c1.uuid = ? AND c2.uuid != ? " +
+                     "ORDER BY c2.last_seen DESC")) {
+            ps.setString(1, uuidStr);
+            ps.setString(2, uuidStr);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) names.add(rs.getString("name"));
+            }
+        } catch (SQLException e) {
+            plugin.getLogger().severe("Failed to get linked accounts for " + uuidStr + ": " + e.getMessage());
+        }
+        return names;
+    }
+
     /** Returns the properly-cased name stored in the DB for a given UUID or name, or null if not found. */
     public String getCanonicalName(String uuid, String nameOrUuid) {
         try (Connection conn = getConnection();
@@ -212,6 +315,43 @@ public class DatabaseManager {
         int offset = (page - 1) * pageSize;
 
         try (Connection conn = getConnection()) {
+
+            // --- Resolve UUID: check mutes first, then connections (covers IP-muted players with no direct history) ---
+            String resolvedUuid = null;
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT uuid FROM mutes WHERE LOWER(target_name) = LOWER(?) OR uuid = ? LIMIT 1")) {
+                ps.setString(1, target);
+                ps.setString(2, target);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) resolvedUuid = rs.getString("uuid");
+                }
+            }
+            if (resolvedUuid == null) {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT uuid FROM connections WHERE LOWER(name) = LOWER(?) OR uuid = ? LIMIT 1")) {
+                    ps.setString(1, target);
+                    ps.setString(2, target);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) resolvedUuid = rs.getString("uuid");
+                    }
+                }
+            }
+            final String finalResolvedUuid = resolvedUuid;
+
+            // --- Canonical display name (mutes table → connections table → raw input) ---
+            String canonical = getCanonicalName(resolvedUuid != null ? resolvedUuid : target, target);
+            if (canonical == null && resolvedUuid != null) {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT name FROM connections WHERE uuid = ? ORDER BY last_seen DESC LIMIT 1")) {
+                    ps.setString(1, resolvedUuid);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) canonical = rs.getString("name");
+                    }
+                }
+            }
+            final String displayName = (canonical != null) ? canonical : target;
+
+            // --- Direct mute count ---
             int total = 0;
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT COUNT(*) FROM mutes WHERE LOWER(target_name) = LOWER(?) OR uuid = ?")) {
@@ -222,75 +362,129 @@ public class DatabaseManager {
                 }
             }
 
-            if (total == 0) {
+            // --- IP-linked mutes: mutes on other accounts that share an IP with this player ---
+            List<String> ipLinkedLines = new ArrayList<>();
+            if (resolvedUuid != null && page == 1) {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT m.reason, m.expiry, m.staff_name, m.unmuted_by, c2.name AS origin_name " +
+                        "FROM mutes m " +
+                        "JOIN connections c2 ON c2.uuid = m.uuid " +
+                        "JOIN connections c1 ON c1.ip = c2.ip " +
+                        "WHERE c1.uuid = ? AND c2.uuid != ? " +
+                        "ORDER BY m.id DESC LIMIT 10")) {
+                    ps.setString(1, resolvedUuid);
+                    ps.setString(2, resolvedUuid);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        Instant now = Instant.now();
+                        while (rs.next()) {
+                            Timestamp expiryTs  = rs.getTimestamp("expiry");
+                            Instant   expiry    = (expiryTs != null) ? expiryTs.toInstant() : TimeUtil.PERMANENT_EXPIRY;
+                            String    unmutedBy = rs.getString("unmuted_by");
+                            String statusText;
+                            if (unmutedBy != null) {
+                                statusText = unmutedBy.contains("Overwritten") ? "§c[Overwritten]" : "§7[Unmuted]";
+                            } else if (!expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)) {
+                                statusText = "§4[Permanent]";
+                            } else if (!now.isBefore(expiry)) {
+                                statusText = "§8[Expired]";
+                            } else {
+                                statusText = "§c[Active]";
+                            }
+                            ipLinkedLines.add("§8§m--------------------------------------\n" +
+                                    statusText + " §7Via account: §f" + rs.getString("origin_name") +
+                                    " §7Staff: " + rs.getString("staff_name") + "\n" +
+                                    "§7Reason: §f" + rs.getString("reason"));
+                        }
+                    }
+                }
+            }
+
+            // --- Nothing found at all ---
+            if (total == 0 && ipLinkedLines.isEmpty()) {
                 Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage("§cNo history found for " + target));
                 return;
             }
 
-            if (offset >= total) {
+            // --- Pagination guard (direct mutes only) ---
+            if (total > 0 && offset >= total) {
                 int maxPage = (int) Math.ceil((double) total / pageSize);
                 Bukkit.getScheduler().runTask(plugin, () ->
                         sender.sendMessage("§cPage " + page + " does not exist. Max page: " + maxPage + "."));
                 return;
             }
 
-            String canonical = getCanonicalName(target, target);
-            final String displayName = (canonical != null) ? canonical : target;
             final int finalTotal = total;
-
             List<String> lines = new ArrayList<>();
-            lines.add("§2§lLabyMod History: §a" + displayName + " §7(" + finalTotal + " entries)");
+            lines.add("§2§lLabyMod History: §a" + displayName + " §7(" + finalTotal + " direct entries)");
 
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT * FROM mutes WHERE LOWER(target_name) = LOWER(?) OR uuid = ? ORDER BY id DESC LIMIT ? OFFSET ?")) {
-                ps.setString(1, target);
-                ps.setString(2, target);
-                ps.setInt(3, pageSize);
-                ps.setInt(4, offset);
-                try (ResultSet rs = ps.executeQuery()) {
-                    Instant now = Instant.now();
-                    while (rs.next()) {
-                        int       id          = rs.getInt("id");
-                        Timestamp expiryTs    = rs.getTimestamp("expiry");
-                        Timestamp createdTs   = rs.getTimestamp("created_at");
-                        Instant   expiry      = (expiryTs != null)  ? expiryTs.toInstant()  : TimeUtil.PERMANENT_EXPIRY;
-                        Instant   createdAt   = (createdTs != null) ? createdTs.toInstant() : Instant.EPOCH;
-                        String    staff       = rs.getString("staff_name");
-                        String    reason      = rs.getString("reason");
-                        String    unmutedBy   = rs.getString("unmuted_by");
-                        String    unmuteReason = rs.getString("unmute_reason");
+            // --- Direct mute entries ---
+            if (total > 0) {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT * FROM mutes WHERE LOWER(target_name) = LOWER(?) OR uuid = ? ORDER BY id DESC LIMIT ? OFFSET ?")) {
+                    ps.setString(1, target);
+                    ps.setString(2, target);
+                    ps.setInt(3, pageSize);
+                    ps.setInt(4, offset);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        Instant now = Instant.now();
+                        while (rs.next()) {
+                            int       id           = rs.getInt("id");
+                            Timestamp expiryTs     = rs.getTimestamp("expiry");
+                            Timestamp createdTs    = rs.getTimestamp("created_at");
+                            Instant   expiry       = (expiryTs != null)  ? expiryTs.toInstant()  : TimeUtil.PERMANENT_EXPIRY;
+                            Instant   createdAt    = (createdTs != null) ? createdTs.toInstant() : Instant.EPOCH;
+                            String    staff        = rs.getString("staff_name");
+                            String    reason       = rs.getString("reason");
+                            String    unmutedBy    = rs.getString("unmuted_by");
+                            String    unmuteReason = rs.getString("unmute_reason");
 
-                        String statusText;
-                        String timeLeftText = "";
+                            String statusText;
+                            String timeLeftText = "";
+                            if (unmutedBy != null) {
+                                statusText = unmutedBy.contains("Overwritten") ? "§c[Overwritten]" : "§7[Unmuted]";
+                            } else if (!expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)) {
+                                statusText = "§4[Permanent]";
+                            } else if (!now.isBefore(expiry)) {
+                                statusText = "§8[Expired]";
+                            } else {
+                                statusText   = "§c[Active]";
+                                timeLeftText = " §8(§e" + TimeUtil.formatDuration(now, expiry) + " left§8)";
+                            }
 
-                        if (unmutedBy != null) {
-                            statusText = unmutedBy.contains("Overwritten") ? "§c[Overwritten]" : "§7[Unmuted]";
-                        } else if (!expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)) {
-                            statusText = "§4[Permanent]";
-                        } else if (!now.isBefore(expiry)) {
-                            statusText = "§8[Expired]";
-                        } else {
-                            statusText   = "§c[Active]";
-                            timeLeftText = " §8(§e" + TimeUtil.formatDuration(now, expiry) + " left§8)";
+                            lines.add("§8§m--------------------------------------\n" +
+                                    "§6ID: #" + id + "  " + statusText + timeLeftText + " §7Staff: " + staff + "\n" +
+                                    "§7Reason: §f" + reason + "\n" +
+                                    "§7Date: §f" + displayFormatter.format(createdAt) +
+                                    (expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)
+                                            ? "\n§7Length: §f" + TimeUtil.formatDuration(createdAt, expiry) : "") +
+                                    (unmutedBy != null && !unmutedBy.contains("Overwritten")
+                                            ? "\n§7Unmuted by: §f" + unmutedBy +
+                                              (unmuteReason != null ? " §8(§7" + unmuteReason + "§8)" : "")
+                                            : ""));
                         }
-
-                        lines.add("§8§m--------------------------------------\n" +
-                                "§6ID: #" + id + "  " + statusText + timeLeftText + " §7Staff: " + staff + "\n" +
-                                "§7Reason: §f" + reason + "\n" +
-                                "§7Date: §f" + displayFormatter.format(createdAt) +
-                                (expiry.isBefore(TimeUtil.PERMANENT_EXPIRY)
-                                        ? "\n§7Length: §f" + TimeUtil.formatDuration(createdAt, expiry) : "") +
-                                (unmutedBy != null && !unmutedBy.contains("Overwritten")
-                                        ? "\n§7Unmuted by: §f" + unmutedBy +
-                                          (unmuteReason != null ? " §8(§7" + unmuteReason + "§8)" : "")
-                                        : ""));
                     }
                 }
+                lines.add("§8§m--------------------------------------");
+                if (finalTotal > offset + pageSize)
+                    lines.add("§7View more: §f/labyhist " + displayName + " " + (page + 1));
             }
 
-            lines.add("§8§m--------------------------------------");
-            if (finalTotal > offset + pageSize)
-                lines.add("§7View more: §f/labyhist " + displayName + " " + (page + 1));
+            // --- IP-linked mutes section (page 1 only) ---
+            if (!ipLinkedLines.isEmpty()) {
+                lines.add("§8§m--------------------------------------");
+                lines.add("§6IP-Linked Mutes §7(caught via associated account):");
+                lines.addAll(ipLinkedLines);
+                lines.add("§8§m--------------------------------------");
+            }
+
+            // --- Linked accounts section (page 1 only) ---
+            if (finalResolvedUuid != null && page == 1) {
+                List<String> linked = getLinkedAccountNames(finalResolvedUuid);
+                if (!linked.isEmpty()) {
+                    lines.add("§6Linked Accounts §7(via shared connection):");
+                    for (String linkedName : linked) lines.add("  §7- §f" + linkedName);
+                }
+            }
 
             Bukkit.getScheduler().runTask(plugin, () -> {
                 for (String line : lines) sender.sendMessage(line);
