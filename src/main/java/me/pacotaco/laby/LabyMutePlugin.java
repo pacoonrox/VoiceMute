@@ -104,13 +104,24 @@ public class LabyMutePlugin extends JavaPlugin implements CommandExecutor, Liste
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
+        // Capture IP on the main thread — getAddress() is not safe to call async
+        String ip = (player.getAddress() != null)
+                ? player.getAddress().getAddress().getHostAddress()
+                : null;
+
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            if (ip != null) db.recordConnection(player.getUniqueId(), ip, player.getName());
+
+            // UUID check first; fall back to IP-based check for alt accounts
             DatabaseManager.ActiveMute mute = db.getActiveMute(player.getUniqueId());
+            if (mute == null && ip != null) mute = db.getActiveMuteByIP(ip);
+
             if (mute != null) {
                 activeMutes.add(player.getUniqueId());
+                final DatabaseManager.ActiveMute finalMute = mute;
                 // Delay to allow LabyMod handshake to complete; guard against disconnect during delay
                 Bukkit.getScheduler().runTaskLater(this, () -> {
-                    if (player.isOnline()) voice.mute(player, mute.reason(), mute.expiry().toEpochMilli());
+                    if (player.isOnline()) voice.mute(player, finalMute.reason(), finalMute.expiry().toEpochMilli());
                 }, 60L);
             }
         });
