@@ -43,6 +43,7 @@ public class DatabaseManager {
         boolean useSSL   = plugin.getConfig().getBoolean("mysql.ssl", false);
 
         HikariConfig config = new HikariConfig();
+        config.setDriverClassName("me.pacotaco.laby.libs.mysql.cj.jdbc.Driver");
         config.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + database
                 + "?useSSL=" + useSSL
                 + "&allowPublicKeyRetrieval=true"
